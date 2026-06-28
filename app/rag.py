@@ -2,14 +2,16 @@ import asyncio
 import os
 import tempfile
 import uuid
+from typing import TypedDict
 
-from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.document_loaders import PyPDFLoader
+from langchain_core.documents import Document
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.runnables import RunnablePassthrough
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_qdrant import QdrantVectorStore, RetrievalMode
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langgraph.graph import END, StateGraph
 from qdrant_client import QdrantClient
 from qdrant_client.models import (
     Distance,
@@ -27,6 +29,18 @@ QDRANT_API_KEY = os.getenv("QDRANT_API_KEY")
 COLLECTION_NAME = "rag-tutorial"
 
 _qdrant_client: QdrantClient | None = None
+
+# ── State du graph ──────────────────────────────────────────────────────────
+
+
+class RAGState(TypedDict):
+    question: str
+    document_ids: list[str]
+    context: list[Document]  # rempli par le nœud retrieve
+    answer: str  # rempli par le nœud generate
+
+
+# ── Clients partagés ────────────────────────────────────────────────────────
 
 
 def get_qdrant_client() -> QdrantClient:
@@ -60,6 +74,63 @@ def get_vectorstore() -> QdrantVectorStore:
     )
 
 
+# ── Nœuds du graph ──────────────────────────────────────────────────────────
+
+
+def retrieve(state: RAGState) -> RAGState:
+    """Nœud 1 : récupère les chunks pertinents depuis Qdrant (hybrid search)."""
+    vectorstore = get_vectorstore()
+    retriever = vectorstore.as_retriever(
+        search_kwargs={
+            "k": 4,
+            "filter": {
+                "must": [{"key": "doc_id", "match": {"any": state["document_ids"]}}]
+            },
+        }
+    )
+    docs = retriever.invoke(state["question"])
+    return {**state, "context": docs}
+
+
+def generate(state: RAGState) -> RAGState:
+    """Nœud 2 : génère la réponse à partir du contexte récupéré."""
+    context_text = "\n\n".join(doc.page_content for doc in state["context"])
+    prompt = ChatPromptTemplate.from_template("""
+Réponds à la question en te basant uniquement sur le contexte suivant.
+Si la réponse n'est pas dans le contexte, dis-le clairement.
+
+Contexte:
+{context}
+
+Question: {question}
+""")
+    llm = ChatOpenAI(
+        model="gpt-4o-mini", temperature=0, api_key=os.getenv("OPENAI_API_KEY")
+    )
+    chain = prompt | llm | StrOutputParser()
+    answer = chain.invoke({"context": context_text, "question": state["question"]})
+    return {**state, "answer": answer}
+
+
+# ── Construction du graph ────────────────────────────────────────────────────
+
+
+def build_rag_graph() -> StateGraph:
+    graph = StateGraph(RAGState)
+    graph.add_node("retrieve", retrieve)
+    graph.add_node("generate", generate)
+    graph.set_entry_point("retrieve")
+    graph.add_edge("retrieve", "generate")
+    graph.add_edge("generate", END)
+    return graph.compile()
+
+
+# Graph compilé une seule fois au démarrage du process
+_rag_graph = build_rag_graph()
+
+# ── Fonctions publiques appelées par main.py ─────────────────────────────────
+
+
 async def process_pdf(
     content: bytes, filename: str, user_email: str, gcs_path: str
 ) -> str:
@@ -79,7 +150,7 @@ async def process_pdf(
             chunk.metadata["doc_id"] = doc_id
             chunk.metadata["filename"] = filename
             chunk.metadata["user_email"] = user_email
-            chunk.metadata["gcs_path"] = gcs_path  # stocké dans le payload Qdrant
+            chunk.metadata["gcs_path"] = gcs_path
         vectorstore = get_vectorstore()
         await asyncio.to_thread(vectorstore.add_documents, chunks)
     finally:
@@ -104,7 +175,6 @@ async def get_user_documents(user_email: str) -> list:
         with_payload=True,
         limit=1000,
     )
-    # Déduplique par doc_id, garde le premier chunk de chaque doc
     seen = {}
     for point in results:
         doc_id = point.payload.get("doc_id")
@@ -119,42 +189,22 @@ async def get_user_documents(user_email: str) -> list:
 
 
 async def ask_question(question: str, document_ids: list[str], user_email: str) -> dict:
-    vectorstore = get_vectorstore()
-    retriever = vectorstore.as_retriever(
-        search_kwargs={
-            "k": 4,
-            "filter": {"must": [{"key": "doc_id", "match": {"any": document_ids}}]},
-        }
-    )
-    prompt = ChatPromptTemplate.from_template("""
-Réponds à la question en te basant uniquement sur le contexte suivant.
-Si la réponse n'est pas dans le contexte, dis-le clairement.
+    """Lance le graph LangGraph et formate la réponse avec les sources."""
+    initial_state: RAGState = {
+        "question": question,
+        "document_ids": document_ids,
+        "context": [],
+        "answer": "",
+    }
+    # graph.invoke est synchrone — on wrappe pour ne pas bloquer FastAPI
+    final_state = await asyncio.to_thread(_rag_graph.invoke, initial_state)
 
-Contexte:
-{context}
-
-Question: {question}
-""")
-    llm = ChatOpenAI(
-        model="gpt-4o-mini", temperature=0, api_key=os.getenv("OPENAI_API_KEY")
-    )
-
-    # Pipeline LCEL — remplace RetrievalQAWithSourcesChain (déprécié depuis LangChain 0.2)
-    chain = (
-        {"context": retriever, "question": RunnablePassthrough()}
-        | prompt
-        | llm
-        | StrOutputParser()
-    )
-    answer = await asyncio.to_thread(chain.invoke, question)
-
-    source_docs = await asyncio.to_thread(retriever.invoke, question)
     sources = [
         {
             "filename": doc.metadata.get("filename"),
             "page": doc.metadata.get("page", 0) + 1,
             "excerpt": doc.page_content[:200] + "...",
         }
-        for doc in source_docs
+        for doc in final_state["context"]
     ]
-    return {"answer": answer, "sources": sources}
+    return {"answer": final_state["answer"], "sources": sources}
