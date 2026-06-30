@@ -11,3 +11,7 @@ wheels/
 
 # Secrets
 env.json
+.env
+
+# Other
+test.ipynb

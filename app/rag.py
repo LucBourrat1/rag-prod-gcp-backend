@@ -26,7 +26,7 @@ os.environ["LANGCHAIN_PROJECT"] = "rag-tutorial"
 
 QDRANT_URL = os.getenv("QDRANT_URL")
 QDRANT_API_KEY = os.getenv("QDRANT_API_KEY")
-COLLECTION_NAME = "rag-tutorial"
+COLLECTION_NAME = "rag-tutorial-gcp"
 
 _qdrant_client: QdrantClient | None = None
 
