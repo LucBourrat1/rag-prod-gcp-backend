@@ -59,12 +59,12 @@ def get_qdrant_client() -> QdrantClient:
             )
             _qdrant_client.create_payload_index(
                 collection_name=COLLECTION_NAME,
-                field_name="user_email",
+                field_name="metadata.user_email",
                 field_schema="keyword",
             )
             _qdrant_client.create_payload_index(
                 collection_name=COLLECTION_NAME,
-                field_name="doc_id",
+                field_name="metadata.doc_id",
                 field_schema="keyword",
             )
     return _qdrant_client
@@ -96,7 +96,9 @@ def retrieve(state: RAGState) -> RAGState:
         search_kwargs={
             "k": 4,
             "filter": {
-                "must": [{"key": "doc_id", "match": {"any": state["document_ids"]}}]
+                "must": [
+                    {"key": "metadata.doc_id", "match": {"any": state["document_ids"]}}
+                ]
             },
         }
     )
@@ -182,19 +184,24 @@ async def get_user_documents(user_email: str) -> list:
         client.scroll,
         collection_name=COLLECTION_NAME,
         scroll_filter=Filter(
-            must=[FieldCondition(key="user_email", match=MatchValue(value=user_email))]
+            must=[
+                FieldCondition(
+                    key="metadata.user_email", match=MatchValue(value=user_email)
+                )
+            ]
         ),
         with_payload=True,
         limit=1000,
     )
     seen = {}
     for point in results:
-        doc_id = point.payload.get("doc_id")
+        metadata = point.payload.get("metadata", {})
+        doc_id = metadata.get("doc_id")
         if doc_id and doc_id not in seen:
             seen[doc_id] = {
                 "doc_id": doc_id,
-                "filename": point.payload.get("filename"),
-                "gcs_path": point.payload.get("gcs_path"),
+                "filename": metadata.get("filename"),
+                "gcs_path": metadata.get("gcs_path"),
                 "status": "indexed",
             }
     return list(seen.values())
