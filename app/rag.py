@@ -9,7 +9,7 @@ from langchain_core.documents import Document
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
-from langchain_qdrant import QdrantVectorStore, RetrievalMode
+from langchain_qdrant import FastEmbedSparse, QdrantVectorStore, RetrievalMode
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langgraph.graph import END, StateGraph
 from qdrant_client import QdrantClient
@@ -26,7 +26,7 @@ os.environ["LANGCHAIN_PROJECT"] = "rag-tutorial"
 
 QDRANT_URL = os.getenv("QDRANT_URL")
 QDRANT_API_KEY = os.getenv("QDRANT_API_KEY")
-COLLECTION_NAME = "rag-tutorial-gcp"
+COLLECTION_NAME = "rag-tuto-gcp"
 
 _qdrant_client: QdrantClient | None = None
 
@@ -57,6 +57,16 @@ def get_qdrant_client() -> QdrantClient:
                     "sparse": SparseVectorParams(index=SparseIndexParams())
                 },
             )
+            _qdrant_client.create_payload_index(
+                collection_name=COLLECTION_NAME,
+                field_name="user_email",
+                field_schema="keyword",
+            )
+            _qdrant_client.create_payload_index(
+                collection_name=COLLECTION_NAME,
+                field_name="doc_id",
+                field_schema="keyword",
+            )
     return _qdrant_client
 
 
@@ -64,10 +74,12 @@ def get_vectorstore() -> QdrantVectorStore:
     embeddings = OpenAIEmbeddings(
         model="text-embedding-3-small", api_key=os.getenv("OPENAI_API_KEY")
     )
+    sparse_embeddings = FastEmbedSparse(model_name="Qdrant/bm25")
     return QdrantVectorStore(
         client=get_qdrant_client(),
         collection_name=COLLECTION_NAME,
         embedding=embeddings,
+        sparse_embedding=sparse_embeddings,
         retrieval_mode=RetrievalMode.HYBRID,
         vector_name="dense",
         sparse_vector_name="sparse",

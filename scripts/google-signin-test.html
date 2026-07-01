@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8" />
+  <title>Test Google Sign-In</title>
+  <script src="https://accounts.google.com/gsi/client" async defer></script>
+  <style>
+    body { font-family: sans-serif; max-width: 600px; margin: 40px auto; padding: 0 16px; }
+    textarea { width: 100%; height: 160px; margin-top: 16px; font-family: monospace; font-size: 12px; }
+    button { margin-top: 8px; padding: 6px 12px; }
+  </style>
+</head>
+<body>
+  <h1>Test Google Sign-In</h1>
+  <p>Connecte-toi pour récupérer un id_token valide (aud = GOOGLE_CLIENT_ID), à coller dans Swagger.</p>
+
+  <div id="g_id_onload"
+       data-client_id="880618097332-m69ggqg6g2osp1u2b6i539p818r65eos.apps.googleusercontent.com"
+       data-callback="handleCredentialResponse">
+  </div>
+  <div class="g_id_signin" data-type="standard"></div>
+
+  <textarea id="token" readonly placeholder="Le id_token apparaîtra ici après connexion..."></textarea>
+  <button onclick="copyToken()">Copier le token</button>
+
+  <script>
+    function handleCredentialResponse(response) {
+      document.getElementById("token").value = response.credential;
+      console.log("id_token:", response.credential);
+    }
+
+    function copyToken() {
+      const field = document.getElementById("token");
+      field.select();
+      navigator.clipboard.writeText(field.value);
+    }
+  </script>
+</body>
+</html>
